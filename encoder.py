@@ -267,8 +267,13 @@ def plot_all_trajectories(all_results):
         q_A = np.array(cfg["q_A"]); q_B = np.array(cfg["q_B"])
         w_BS = np.array(cfg["w_BS"]); w_PU = np.array(cfg["w_PU"])
 
-        # Quỹ đạo tối ưu
-        ax.plot(traj[:, 0], traj[:, 1], 'b-o', ms=3, lw=1.5, label='Optimized')
+        # Quỹ đạo tối ưu (Sigmoid QoE)
+        ax.plot(traj[:, 0], traj[:, 1], 'b-o', ms=3, lw=1.5, label='Sigmoid QoE')
+        # Quỹ đạo Log QoE
+        if "traj_log" in data:
+            traj_log = data["traj_log"]
+            ax.plot(traj_log[:, 0], traj_log[:, 1], '-s', color='#FF5722',
+                    ms=3, lw=1.5, alpha=0.8, label='Log QoE')
         # Đường thẳng A→B
         traj_s = data["traj_straight"]
         ax.plot(traj_s[:, 0], traj_s[:, 1], '--', color='orange', alpha=0.5, label='Straight')
