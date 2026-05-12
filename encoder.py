@@ -3,31 +3,80 @@
 H.264 Adaptive Encoder — UAV CR-NOMA Video Transmission
 ================================================================================
 Nén video foreman_cif.yuv bằng FFmpeg (libx264) với QP thích nghi theo
-Rate R(t) từ thuật toán tối ưu BCD+SCA trong uav_simulation.py.
+Rate R(t) từ thuật toán tối ưu BCD+SCA.
 
-Pipeline:
-  uav_simulation.py → Rate R(t) → rate_to_qp() → FFmpeg encode → .264 bitstream
+Hỗ trợ nhiều tổ hợp vị trí PU/BS để chứng minh tính tổng quát của thuật toán.
 
-Kịch bản đối chứng:
-  - Optimized (BCD+SCA): Quỹ đạo + công suất tối ưu
-  - Straight Line:       Bay thẳng A→B, công suất an toàn
-  - Circle:              Bay vòng tròn né PU, công suất an toàn
+Cách chạy:
+  python encoder.py
 ================================================================================
 """
 
 import os
 import subprocess
 import numpy as np
-import json
 import imageio_ffmpeg
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 from pathlib import Path
+from scipy.optimize import minimize
 
 BASE_DIR = Path(__file__).parent
-DATA_DIR = BASE_DIR / "results" / "bitstreams"
+BITSTREAM_DIR = BASE_DIR / "results" / "bitstreams"
+RESULTS_DIR = BASE_DIR / "results"
 YUV_PATH = BASE_DIR / "foreman_cif.yuv"
 
+# ==============================================================================
+# CÁC CẤU HÌNH VỊ TRÍ PU/BS
+# ==============================================================================
 
-class MultiScenarioEncoder:
+CONFIGS = {
+    "Case1_Default": {
+        "desc": "PU giua, BS canh (Mac dinh)",
+        "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
+        "w_BS": [200.0, 0.0], "w_PU": [100.0, 100.0],
+    },
+    "Case2_PU_Blocking": {
+        "desc": "PU chan giua duong bay A->B",
+        "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
+        "w_BS": [200.0, 0.0], "w_PU": [100.0, 100.0 + 0.01],  # PU nằm đúng giữa
+    },
+    "Case3_BS_Far": {
+        "desc": "BS o xa, PU gan BS",
+        "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
+        "w_BS": [300.0, 50.0], "w_PU": [250.0, 80.0],
+    },
+    "Case4_Opposite": {
+        "desc": "PU va BS doi dien nhau",
+        "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
+        "w_BS": [50.0, 200.0], "w_PU": [200.0, 50.0],
+    },
+    "Case5_PU_Near_Start": {
+        "desc": "PU gan diem xuat phat A",
+        "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
+        "w_BS": [200.0, 0.0], "w_PU": [30.0, 30.0],
+    },
+}
+
+# ==============================================================================
+# THAM SỐ CHUNG
+# ==============================================================================
+H = 100.0; N = 30; T = 30.0; dt = T / N
+V_max = 15.0; D_max = V_max * dt
+P_max = 0.5; P_pu = 0.3
+beta0 = 1e-4; sigma2 = 1e-11
+I_th = 5e-11; R_pu_min = 0.5
+w0, w1, alpha_q = 0.6, 0.4, 5.0
+R_BL, R_EL = 2.0, 3.0
+P_safe = 0.005  # Công suất an toàn cho baseline
+
+
+# ==============================================================================
+# BỘ NÉN VIDEO
+# ==============================================================================
+
+class VideoEncoder:
     def __init__(self, yuv_path, width=352, height=288):
         self.yuv_path = str(yuv_path)
         self.width = width
@@ -36,11 +85,6 @@ class MultiScenarioEncoder:
         self.ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
 
     def rate_to_qp(self, rate):
-        """
-        Ánh xạ Rate (bps/Hz) sang QP.
-        Rate ~2.0 → QP=32 (kênh xấu, nén mạnh)
-        Rate ~4.0 → QP=10 (kênh tốt, nén nhẹ, chất lượng cao)
-        """
         qp = 32 - (rate - 2.0) * (22 / 2.0)
         return int(np.clip(qp, 10, 45))
 
@@ -59,82 +103,69 @@ class MultiScenarioEncoder:
         process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         process.communicate(input=frames_data)
 
-    def run_scenario(self, scenario_name, rates, output_dir):
+    def encode_scenario(self, rates, output_dir):
         os.makedirs(output_dir, exist_ok=True)
-        print(f"\n  [{scenario_name}]")
         total_size = 0
         for i, r in enumerate(rates):
             qp = self.rate_to_qp(r)
             output_path = os.path.join(output_dir, f"slot_{i+1:03d}.264")
             frames_data = self.get_segment_frames(i * 10, 10)
             self.encode_gop(frames_data, output_path, qp)
-            size = os.path.getsize(output_path) / 1024
-            total_size += size
-            if i % 10 == 0 or i == len(rates) - 1:
-                print(f"    Slot {i+1:2d}/30: Rate={r:.2f} bps/Hz -> QP={qp:2d} | {size:.1f} KB")
-        print(f"    Total size: {total_size:.1f} KB")
+            total_size += os.path.getsize(output_path) / 1024
+        return total_size
+
+    def encode_svc(self, rates, output_dir, qp_bl=35, qp_el=15):
+        """
+        SVC 2-Layer Encoding:
+          - Base Layer (BL): QP cao, dung luong nho, luon truyen duoc
+          - Enhancement Layer (EL): QP thap, chat luong cao, chi truyen khi kenh tot
+        Decoder se chon lop nao dua tren Rate R(t).
+        """
+        bl_dir = os.path.join(output_dir, "BL")
+        el_dir = os.path.join(output_dir, "EL")
+        os.makedirs(bl_dir, exist_ok=True)
+        os.makedirs(el_dir, exist_ok=True)
+
+        total_bl, total_el = 0, 0
+        for i in range(len(rates)):
+            frames_data = self.get_segment_frames(i * 10, 10)
+            # Base Layer
+            bl_path = os.path.join(bl_dir, f"slot_{i+1:03d}.264")
+            self.encode_gop(frames_data, bl_path, qp_bl)
+            total_bl += os.path.getsize(bl_path) / 1024
+            # Enhancement Layer
+            el_path = os.path.join(el_dir, f"slot_{i+1:03d}.264")
+            self.encode_gop(frames_data, el_path, qp_el)
+            total_el += os.path.getsize(el_path) / 1024
+
+        print(f"      BL (QP={qp_bl}): {total_bl:.1f} KB")
+        print(f"      EL (QP={qp_el}): {total_el:.1f} KB")
+        return total_bl, total_el
 
 
-# ============================================================
-# Hàm tạo dữ liệu baseline (thay cho file run_baselines.py)
-# ============================================================
+# ==============================================================================
+# BỘ TỐI ƯU BCD+SCA (Tham số hóa vị trí PU/BS)
+# ==============================================================================
 
-def generate_baselines():
-    """Tạo dữ liệu Rate cho các kịch bản đối chứng"""
-    q_A = np.array([0.0, 0.0])
-    q_B = np.array([200.0, 200.0])
-    w_BS = np.array([200.0, 0.0])
-    w_PU = np.array([100.0, 100.0])
-    H = 100.0; N = 30
-    beta0 = 1e-4; sigma2 = 1e-11
-    P_safe = 0.005  # Công suất an toàn (5mW) để không nhiễu PU
-
-    def h_uav(q): return beta0 / (np.sum((q - w_BS)**2) + H**2)
-    def rate_uav(p, q): return np.log2(1 + p * h_uav(q) / sigma2)
-
-    # Straight line: A → B
-    traj_straight = np.array([q_A + (q_B-q_A)*(n+1)/(N+1) for n in range(N)])
-    rates_straight = [rate_uav(P_safe, q) for q in traj_straight]
-
-    # Circle: Vòng tròn quanh PU (né PU, xa BS)
-    r_avoid = 120.0
-    angles = np.linspace(0, np.pi, N)
-    traj_circle = np.array([w_PU + np.array([r_avoid*np.cos(a), r_avoid*np.sin(a)]) for a in angles])
-    rates_circle = [rate_uav(P_safe, q) for q in traj_circle]
-
-    return {
-        "straight": rates_straight,
-        "circle": rates_circle
-    }
-
-
-# ============================================================
-# Hàm chạy simulation gốc (thay cho file run_orig_sim.py)
-# ============================================================
-
-def run_original_simulation():
-    """Chạy thuật toán BCD+SCA từ uav_simulation.py và trả về rates"""
-    from scipy.optimize import minimize
-
-    q_A = np.array([0.0, 0.0])
-    q_B = np.array([200.0, 200.0])
-    w_BS = np.array([200.0, 0.0])
-    w_PU = np.array([100.0, 100.0])
-    H = 100.0
-    N = 30; T = 30.0; dt = T/N
-    V_max = 15.0; D_max = V_max * dt
-    P_max = 0.5; P_pu = 0.3
-    beta0 = 1e-4; sigma2 = 1e-11
-    I_th = 5e-11; R_pu_min = 0.5
-    w0, w1, alpha_q = 0.6, 0.4, 5.0
-    R_BL, R_EL = 2.0, 3.0
+def run_bcd_sca(q_A, q_B, w_BS, w_PU, qoe_mode='sigmoid'):
+    """Chạy BCD+SCA với bộ tọa độ PU/BS tùy ý.
+    qoe_mode: 'sigmoid' (Double Sigmoid cho SVC) hoặc 'log' (Logarithmic cho Adaptive QP)
+    Trả về (rates, trajectory, power)."""
+    q_A, q_B = np.array(q_A), np.array(q_B)
+    w_BS, w_PU = np.array(w_BS), np.array(w_PU)
 
     def h_uav(q): return beta0 / (np.sum((q - w_BS)**2) + H**2)
     def g_pu(q):  return beta0 / (np.sum((q - w_PU)**2) + H**2)
     h_pu_val = beta0 / np.sum((w_PU - w_BS)**2)
     def rate_uav(p, q): return np.log2(1 + p * h_uav(q) / sigma2)
-    def qoe_slot(R):
+
+    def qoe_sigmoid(R):
         return w0/(1+np.exp(-alpha_q*(R - R_BL))) + w1/(1+np.exp(-alpha_q*(R - (R_BL+R_EL))))
+
+    def qoe_log(R):
+        return np.log2(1 + max(R, 0))
+
+    qoe_slot = qoe_sigmoid if qoe_mode == 'sigmoid' else qoe_log
 
     def solve_power(traj):
         p = np.zeros(N)
@@ -180,46 +211,196 @@ def run_original_simulation():
     # Main BCD Loop
     traj = np.array([q_A + (q_B-q_A)*(n+1)/(N+1) for n in range(N)])
     p = np.ones(N) * 0.01
-
-    print("  Running BCD+SCA optimization (8 iterations)...")
     for it in range(8):
         p = solve_power(traj)
         traj = solve_trajectory(p, traj)
         qoe_val = sum(qoe_slot(rate_uav(p[n], traj[n])) for n in range(N))
-        print(f"    Iter {it+1}: QoE = {qoe_val:.4f}")
+        print(f"      Iter {it+1}: QoE = {qoe_val:.4f}")
 
     rates = [rate_uav(p[n], traj[n]) for n in range(N)]
-    return rates
+    return rates, traj, p
 
 
-# ============================================================
-# Main
-# ============================================================
+def compute_straight_rates(q_A, q_B, w_BS):
+    """Tính Rate cho baseline Straight Line với công suất an toàn."""
+    q_A, q_B, w_BS = np.array(q_A), np.array(q_B), np.array(w_BS)
+    def h_uav(q): return beta0 / (np.sum((q - w_BS)**2) + H**2)
+    def rate_uav(p, q): return np.log2(1 + p * h_uav(q) / sigma2)
+    traj = np.array([q_A + (q_B-q_A)*(n+1)/(N+1) for n in range(N)])
+    return [rate_uav(P_safe, q) for q in traj], traj
+
+
+def compute_circle_rates(q_A, q_B, w_BS):
+    """Tính Rate cho baseline Circle: bay vòng tròn từ A đến B."""
+    q_A, q_B, w_BS = np.array(q_A), np.array(q_B), np.array(w_BS)
+    def h_uav(q): return beta0 / (np.sum((q - w_BS)**2) + H**2)
+    def rate_uav(p, q): return np.log2(1 + p * h_uav(q) / sigma2)
+    # Tâm vòng tròn = trung điểm A-B, bán kính = nửa khoảng cách A-B
+    center = (q_A + q_B) / 2
+    radius = np.linalg.norm(q_B - q_A) / 2
+    # Góc bắt đầu từ A, kết thúc tại B
+    angle_start = np.arctan2(q_A[1] - center[1], q_A[0] - center[0])
+    angle_end = angle_start + np.pi  # Nửa vòng tròn
+    angles = np.linspace(angle_start, angle_end, N)
+    traj = np.array([center + radius * np.array([np.cos(a), np.sin(a)]) for a in angles])
+    return [rate_uav(P_safe, q) for q in traj], traj
+
+
+# ==============================================================================
+# VẼ QUỸ ĐẠO
+# ==============================================================================
+
+def plot_all_trajectories(all_results):
+    """Vẽ quỹ đạo tối ưu cho tất cả các cấu hình PU/BS."""
+    n_cases = len(all_results)
+    cols = min(3, n_cases)
+    rows = (n_cases + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 5*rows))
+    if n_cases == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+
+    for idx, (case_name, data) in enumerate(all_results.items()):
+        ax = axes[idx]
+        cfg = data["config"]
+        traj = data["trajectory"]
+        q_A = np.array(cfg["q_A"]); q_B = np.array(cfg["q_B"])
+        w_BS = np.array(cfg["w_BS"]); w_PU = np.array(cfg["w_PU"])
+
+        # Quỹ đạo tối ưu
+        ax.plot(traj[:, 0], traj[:, 1], 'b-o', ms=3, lw=1.5, label='Optimized')
+        # Đường thẳng A→B
+        traj_s = data["traj_straight"]
+        ax.plot(traj_s[:, 0], traj_s[:, 1], '--', color='orange', alpha=0.5, label='Straight')
+        # Vòng tròn
+        traj_c = data["traj_circle"]
+        ax.plot(traj_c[:, 0], traj_c[:, 1], ':', color='green', alpha=0.5, label='Circle')
+        # Các điểm
+        ax.plot(*q_A, 'gs', ms=12, zorder=5)
+        ax.plot(*q_B, 'g^', ms=12, zorder=5)
+        ax.plot(*w_BS, 'kD', ms=10, label='BS', zorder=5)
+        ax.plot(*w_PU, 'r^', ms=12, label='PU', zorder=5)
+        ax.add_patch(plt.Circle(w_PU, 30, color='r', fill=True, alpha=0.1))
+
+        ax.set_title(f"{case_name}\n{cfg['desc']}", fontsize=10)
+        ax.set_xlabel("X (m)"); ax.set_ylabel("Y (m)")
+        ax.legend(fontsize=6, loc='best')
+        ax.grid(True, alpha=0.3)
+        ax.set_aspect('equal')
+
+    # Ẩn subplot thừa
+    for i in range(n_cases, len(axes)):
+        axes[i].set_visible(False)
+
+    fig.suptitle("UAV Trajectory Optimization — Different PU/BS Configurations",
+                 fontsize=14, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    path = str(RESULTS_DIR / "trajectories_all_cases.png")
+    fig.savefig(path, dpi=150)
+    print(f"  Saved trajectory plot: {path}")
+
+
+# ==============================================================================
+# MAIN
+# ==============================================================================
 
 if __name__ == "__main__":
     print("=" * 60)
     print(" UAV CR-NOMA H.264 Adaptive Encoder")
+    print(" Multi-Configuration Benchmark")
     print("=" * 60)
 
-    encoder = MultiScenarioEncoder(YUV_PATH)
+    encoder = VideoEncoder(YUV_PATH)
+    all_results = {}
 
-    # Step 1: Chạy simulation gốc
-    print("\n[Step 1] Running Optimization...")
-    opt_rates = run_original_simulation()
+    for case_name, cfg in CONFIGS.items():
+        print(f"\n{'='*60}")
+        print(f"  {case_name}: {cfg['desc']}")
+        print(f"  BS={cfg['w_BS']}, PU={cfg['w_PU']}")
+        print(f"{'='*60}")
 
-    # Step 2: Tạo baseline
-    print("\n[Step 2] Generating Baselines...")
-    baselines = generate_baselines()
+        # 1. Chạy BCD+SCA (Sigmoid QoE)
+        print("    [Optimized - Sigmoid QoE] Running BCD+SCA...")
+        opt_rates, traj, power = run_bcd_sca(
+            cfg["q_A"], cfg["q_B"], cfg["w_BS"], cfg["w_PU"], qoe_mode='sigmoid')
+        avg_opt = np.mean(opt_rates)
 
-    # Step 3: Encode tất cả
-    print("\n[Step 3] Encoding Video...")
-    encoder.run_scenario("Optimized (BCD+SCA)",
-                         opt_rates, str(DATA_DIR / "Optimized"))
-    encoder.run_scenario("Straight Line",
-                         baselines["straight"], str(DATA_DIR / "Straight"))
-    encoder.run_scenario("Circle",
-                         baselines["circle"], str(DATA_DIR / "Circle"))
+        # 2. Chạy BCD+SCA (Log QoE) — tối ưu cho Adaptive QP
+        print("    [Opt_LogQoE - Log QoE] Running BCD+SCA...")
+        log_rates, traj_log, power_log = run_bcd_sca(
+            cfg["q_A"], cfg["q_B"], cfg["w_BS"], cfg["w_PU"], qoe_mode='log')
+        avg_log = np.mean(log_rates)
 
-    print("\n" + "=" * 60)
-    print(" All scenarios encoded successfully!")
-    print("=" * 60)
+        # 3. Baseline Straight
+        straight_rates, traj_s = compute_straight_rates(
+            cfg["q_A"], cfg["q_B"], cfg["w_BS"])
+        avg_straight = np.mean(straight_rates)
+
+        # 4. Baseline Circle
+        circle_rates, traj_c = compute_circle_rates(
+            cfg["q_A"], cfg["q_B"], cfg["w_BS"])
+        avg_circle = np.mean(circle_rates)
+
+        print(f"    Avg Rate: Sigmoid={avg_opt:.2f}, Log={avg_log:.2f}, Straight={avg_straight:.2f}, Circle={avg_circle:.2f}")
+
+        # 5. Encode
+        print("    Encoding Optimized (Sigmoid QoE + Adaptive QP)...")
+        sz_opt = encoder.encode_scenario(
+            opt_rates, str(BITSTREAM_DIR / case_name / "Optimized"))
+        print(f"      Size: {sz_opt:.1f} KB")
+
+        print("    Encoding Opt_LogQoE (Log QoE + Adaptive QP)...")
+        sz_log = encoder.encode_scenario(
+            log_rates, str(BITSTREAM_DIR / case_name / "Opt_LogQoE"))
+        print(f"      Size: {sz_log:.1f} KB")
+
+        print("    Encoding Straight...")
+        sz_straight = encoder.encode_scenario(
+            straight_rates, str(BITSTREAM_DIR / case_name / "Straight"))
+        print(f"      Size: {sz_straight:.1f} KB")
+
+        print("    Encoding Circle...")
+        sz_circle = encoder.encode_scenario(
+            circle_rates, str(BITSTREAM_DIR / case_name / "Circle"))
+        print(f"      Size: {sz_circle:.1f} KB")
+
+        # 6. SVC 2-Layer (dùng quỹ đạo sigmoid)
+        print("    Encoding SVC (BL+EL)...")
+        encoder.encode_svc(
+            opt_rates, str(BITSTREAM_DIR / case_name / "SVC"))
+
+        # Lưu rates để evaluator biết chọn lớp nào
+        import json
+        rates_path = str(BITSTREAM_DIR / case_name / "opt_rates.json")
+        with open(rates_path, 'w') as f:
+            json.dump(opt_rates, f)
+
+        all_results[case_name] = {
+            "config": cfg,
+            "opt_rates": opt_rates,
+            "log_rates": log_rates,
+            "straight_rates": straight_rates,
+            "circle_rates": circle_rates,
+            "trajectory": traj,
+            "traj_log": traj_log,
+            "traj_straight": traj_s,
+            "traj_circle": traj_c,
+        }
+
+    # 7. Vẽ quỹ đạo
+    print("\n[Plotting trajectories...]")
+    plot_all_trajectories(all_results)
+
+    # 8. Bảng tổng kết
+    print("\n" + "=" * 85)
+    print(f" {'Case':<22} {'Sigmoid':>10} {'LogQoE':>10} {'Straight':>10} {'Circle':>10}")
+    print("-" * 85)
+    for name, data in all_results.items():
+        avg_o = np.mean(data["opt_rates"])
+        avg_l = np.mean(data["log_rates"])
+        avg_s = np.mean(data["straight_rates"])
+        avg_c = np.mean(data["circle_rates"])
+        print(f" {name:<22} {avg_o:>8.2f}   {avg_l:>8.2f}   {avg_s:>8.2f}   {avg_c:>8.2f}")
+    print("=" * 85)
+    print("\nDone! Run evaluator.py to measure PSNR.")
+
