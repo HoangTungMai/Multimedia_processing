@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+myenv/
+
+# Video files (too large for git)
+*.yuv
+*.264
+*.mp4
+*.avi
+
+# Results (regenerable)
+results/bitstreams/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
