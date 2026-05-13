@@ -211,14 +211,16 @@ def run_bcd_sca(q_A, q_B, w_BS, w_PU, qoe_mode='sigmoid'):
     # Main BCD Loop
     traj = np.array([q_A + (q_B-q_A)*(n+1)/(N+1) for n in range(N)])
     p = np.ones(N) * 0.01
+    qoe_history = []
     for it in range(8):
         p = solve_power(traj)
         traj = solve_trajectory(p, traj)
         qoe_val = sum(qoe_slot(rate_uav(p[n], traj[n])) for n in range(N))
+        qoe_history.append(qoe_val)
         print(f"      Iter {it+1}: QoE = {qoe_val:.4f}")
 
     rates = [rate_uav(p[n], traj[n]) for n in range(N)]
-    return rates, traj, p
+    return rates, traj, p, qoe_history
 
 
 def compute_straight_rates(q_A, q_B, w_BS):
@@ -326,13 +328,13 @@ if __name__ == "__main__":
 
         # 1. Chạy BCD+SCA (Sigmoid QoE)
         print("    [Optimized - Sigmoid QoE] Running BCD+SCA...")
-        opt_rates, traj, power = run_bcd_sca(
+        opt_rates, traj, power, qoe_hist_sig = run_bcd_sca(
             cfg["q_A"], cfg["q_B"], cfg["w_BS"], cfg["w_PU"], qoe_mode='sigmoid')
         avg_opt = np.mean(opt_rates)
 
         # 2. Chạy BCD+SCA (Log QoE) — tối ưu cho Adaptive QP
         print("    [Opt_LogQoE - Log QoE] Running BCD+SCA...")
-        log_rates, traj_log, power_log = run_bcd_sca(
+        log_rates, traj_log, power_log, qoe_hist_log = run_bcd_sca(
             cfg["q_A"], cfg["q_B"], cfg["w_BS"], cfg["w_PU"], qoe_mode='log')
         avg_log = np.mean(log_rates)
 
@@ -390,13 +392,41 @@ if __name__ == "__main__":
             "traj_log": traj_log,
             "traj_straight": traj_s,
             "traj_circle": traj_c,
+            "qoe_hist_sig": qoe_hist_sig,
+            "qoe_hist_log": qoe_hist_log,
         }
 
     # 7. Vẽ quỹ đạo
     print("\n[Plotting trajectories...]")
     plot_all_trajectories(all_results)
 
-    # 8. Bảng tổng kết
+    # 8. Vẽ BCD Convergence Curve
+    print("[Plotting BCD convergence...]")
+    n_cases = len(all_results)
+    fig, axes = plt.subplots(1, n_cases, figsize=(4 * n_cases, 4))
+    if n_cases == 1:
+        axes = [axes]
+    for idx, (case_name, data) in enumerate(all_results.items()):
+        ax = axes[idx]
+        iters = range(1, 9)
+        ax.plot(iters, data["qoe_hist_sig"], '-o', color='#2196F3',
+                ms=5, lw=2, label='Sigmoid QoE')
+        ax.plot(iters, data["qoe_hist_log"], '-s', color='#FF5722',
+                ms=5, lw=2, label='Log QoE')
+        ax.set_xlabel('BCD Iteration', fontsize=10)
+        ax.set_ylabel('Total QoE', fontsize=10)
+        ax.set_title(case_name, fontsize=10, fontweight='bold')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_xticks(range(1, 9))
+    fig.suptitle('BCD+SCA Convergence: QoE vs Iteration',
+                 fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    conv_path = str(RESULTS_DIR / "bcd_convergence.png")
+    fig.savefig(conv_path, dpi=150)
+    print(f"  Saved: {conv_path}")
+
+    # 9. Bảng tổng kết
     print("\n" + "=" * 85)
     print(f" {'Case':<22} {'Sigmoid':>10} {'LogQoE':>10} {'Straight':>10} {'Circle':>10}")
     print("-" * 85)
