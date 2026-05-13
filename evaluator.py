@@ -81,15 +81,18 @@ class QualityEvaluator:
 
     def evaluate_svc(self, svc_dir, rates, r_bl=2.0, r_el=3.0):
         """
-        SVC Evaluation: Chon BL hoac EL dua tren Rate R(t).
-        - R(t) >= R_BL + R_EL -> dung EL (chat luong cao)
-        - R(t) >= R_BL -> dung BL (chat luong co ban)
-        - R(t) < R_BL -> khong truyen duoc (dung frame truoc)
+        SVC Evaluation (Residual-based):
+        - R(t) >= R_BL + R_EL -> nhan duoc ca BL va EL
+          → Final = BL_decoded + (EL_decoded - 128)  (cong residual)
+        - R(t) >= R_BL -> chi nhan duoc BL
+          → Final = BL_decoded
+        - R(t) < R_BL -> khong truyen duoc
+          → Freeze frame truoc
         """
         bl_dir = os.path.join(svc_dir, "BL")
         el_dir = os.path.join(svc_dir, "EL")
         bl_frames = self.decode_folder(bl_dir)
-        el_frames = self.decode_folder(el_dir)
+        el_frames = self.decode_folder(el_dir)  # Đây là residual đã shift +128
 
         psnrs = []
         frames_per_slot = 10
@@ -100,16 +103,21 @@ class QualityEvaluator:
             end = start + frames_per_slot
 
             for i in range(start, min(end, len(self.original_frames))):
-                if rate >= r_bl + r_el and i < len(el_frames):
-                    # Kenh tot: dung Enhancement Layer
-                    decoded = el_frames[i]
+                if rate >= r_bl + r_el and i < len(el_frames) and i < len(bl_frames):
+                    # Kênh tốt: BL + EL (residual) = video nét
+                    combined = np.clip(
+                        bl_frames[i].astype(np.int16)
+                        + el_frames[i].astype(np.int16) - 128,
+                        0, 255
+                    ).astype(np.uint8)
+                    decoded = combined
                     prev_frame = decoded
                 elif rate >= r_bl and i < len(bl_frames):
-                    # Kenh trung binh: dung Base Layer
+                    # Kênh trung bình: chỉ BL
                     decoded = bl_frames[i]
                     prev_frame = decoded
                 else:
-                    # Kenh xau: dung frame truoc (freeze)
+                    # Kênh xấu: freeze
                     if prev_frame is not None:
                         decoded = prev_frame
                     else:

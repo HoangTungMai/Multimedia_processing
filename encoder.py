@@ -116,10 +116,10 @@ class VideoEncoder:
 
     def encode_svc(self, rates, output_dir, qp_bl=35, qp_el=15):
         """
-        SVC 2-Layer Encoding:
-          - Base Layer (BL): QP cao, dung luong nho, luon truyen duoc
-          - Enhancement Layer (EL): QP thap, chat luong cao, chi truyen khi kenh tot
-        Decoder se chon lop nao dua tren Rate R(t).
+        SVC 2-Layer Encoding (Residual-based):
+          - Base Layer (BL): Nén video gốc với QP cao → video mờ, nhẹ
+          - Enhancement Layer (EL): Nén phần SAI KHÁC (residual = gốc - BL)
+            → BL + EL = video nét (giống SVC chuẩn H.264 Annex G)
         """
         bl_dir = os.path.join(output_dir, "BL")
         el_dir = os.path.join(output_dir, "EL")
@@ -129,17 +129,65 @@ class VideoEncoder:
         total_bl, total_el = 0, 0
         for i in range(len(rates)):
             frames_data = self.get_segment_frames(i * 10, 10)
-            # Base Layer
+
+            # --- Base Layer: nén video gốc ---
             bl_path = os.path.join(bl_dir, f"slot_{i+1:03d}.264")
             self.encode_gop(frames_data, bl_path, qp_bl)
             total_bl += os.path.getsize(bl_path) / 1024
-            # Enhancement Layer
+
+            # --- Decode BL để tính residual ---
+            import cv2
+            cap = cv2.VideoCapture(bl_path)
+            bl_frames = []
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                bl_frames.append(frame)
+            cap.release()
+
+            # --- Tính Residual: (Original - BL_decoded) + 128 ---
+            # Đọc 10 frames gốc từ YUV
+            orig_frames = []
+            with open(self.yuv_path, 'rb') as f:
+                f.seek(i * 10 * self.frame_size)
+                for _ in range(10):
+                    data = f.read(self.frame_size)
+                    if not data:
+                        break
+                    yuv = np.frombuffer(data, dtype=np.uint8).reshape(
+                        (int(self.height * 1.5), self.width))
+                    bgr = cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_I420)
+                    orig_frames.append(bgr)
+
+            # Tạo YUV residual để encode
+            n_frames = min(len(orig_frames), len(bl_frames))
+            residual_yuv = bytearray()
+            for j in range(n_frames):
+                # Residual + 128 (shift để nằm trong [0, 255])
+                res = np.clip(
+                    orig_frames[j].astype(np.int16) - bl_frames[j].astype(np.int16) + 128,
+                    0, 255
+                ).astype(np.uint8)
+                # Convert BGR → YUV420 để FFmpeg đọc
+                yuv_frame = cv2.cvtColor(res, cv2.COLOR_BGR2YUV_I420)
+                residual_yuv.extend(yuv_frame.tobytes())
+
+            # --- Enhancement Layer: nén residual ---
             el_path = os.path.join(el_dir, f"slot_{i+1:03d}.264")
-            self.encode_gop(frames_data, el_path, qp_el)
+            cmd = [
+                self.ffmpeg_exe, '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+                '-s', f'{self.width}x{self.height}', '-pix_fmt', 'yuv420p',
+                '-i', '-', '-c:v', 'libx264', '-qp', str(qp_el),
+                '-g', '10', '-frames:v', str(n_frames), el_path
+            ]
+            process = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+            process.communicate(input=bytes(residual_yuv))
             total_el += os.path.getsize(el_path) / 1024
 
         print(f"      BL (QP={qp_bl}): {total_bl:.1f} KB")
-        print(f"      EL (QP={qp_el}): {total_el:.1f} KB")
+        print(f"      EL residual (QP={qp_el}): {total_el:.1f} KB")
+        print(f"      Total SVC: {total_bl + total_el:.1f} KB")
         return total_bl, total_el
 
 
