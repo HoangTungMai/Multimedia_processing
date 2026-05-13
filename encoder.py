@@ -68,7 +68,7 @@ P_max = 0.5; P_pu = 0.3
 beta0 = 1e-4; sigma2 = 1e-11
 I_th = 5e-11; R_pu_min = 0.5
 w0, w1, alpha_q = 0.6, 0.4, 5.0
-R_BL, R_EL = 2.0, 3.0
+R_BL, R_EL = 2.0, 1.0
 P_safe = 0.005  # Công suất an toàn cho baseline
 
 
