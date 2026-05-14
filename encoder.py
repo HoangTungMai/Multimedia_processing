@@ -37,11 +37,6 @@ CONFIGS = {
         "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
         "w_BS": [200.0, 0.0], "w_PU": [100.0, 100.0],
     },
-    "Case2_PU_Blocking": {
-        "desc": "PU chan giua duong bay A->B",
-        "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
-        "w_BS": [200.0, 0.0], "w_PU": [100.0, 100.0 + 0.01],  # PU nằm đúng giữa
-    },
     "Case3_BS_Far": {
         "desc": "BS o xa, PU gan BS",
         "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
@@ -83,10 +78,72 @@ class VideoEncoder:
         self.height = height
         self.frame_size = int(width * height * 1.5)
         self.ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+        # R-Q Model parameters (Ma, Siwei et al. 2005)
+        self.X1 = 0.85   # Hệ số bậc 1
+        self.X2 = 0.1    # Hệ số bậc 2
+        self.W = 4       # Hệ số bandwidth hiệu dụng
+        self.T_slot = T / N  # Thời gian 1 slot (s)
+        self.fps = 10    # Frames per slot
+        # Tính MAD cho từng slot
+        print("  Computing MAD per slot (R-Q Model)...")
+        self.slot_mad = self._compute_slot_mad()
+        print(f"  MAD range: {min(self.slot_mad):.2f} ~ {max(self.slot_mad):.2f}")
 
-    def rate_to_qp(self, rate):
-        qp = 32 - (rate - 2.0) * (22 / 2.0)
-        return int(np.clip(qp, 10, 45))
+    def _compute_slot_mad(self):
+        """Tính Mean Absolute Difference cho mỗi slot (10 frames/slot)."""
+        frames = []
+        with open(self.yuv_path, 'rb') as f:
+            while True:
+                data = f.read(self.frame_size)
+                if not data:
+                    break
+                y_plane = np.frombuffer(data[:self.width * self.height], dtype=np.uint8)
+                frames.append(y_plane.astype(np.float32))
+
+        slot_mad = []
+        for slot in range(N):
+            start = slot * self.fps
+            end = min(start + self.fps, len(frames))
+            mad_vals = []
+            for i in range(start, end):
+                if i == 0:
+                    mad = np.mean(np.abs(frames[i] - 128.0))
+                else:
+                    mad = np.mean(np.abs(frames[i] - frames[i - 1]))
+                mad_vals.append(mad)
+            slot_mad.append(np.mean(mad_vals))
+        return slot_mad
+
+    def rate_to_qp(self, rate, slot_idx=0):
+        """R-Q Model: Channel Rate → Qstep → QP (Ma, Siwei 2005).
+
+        R_frame = MAD × (X1/Qstep + X2/Qstep²)
+        Qstep = 2^((QP-4)/6)
+        """
+        # Bits khả dụng mỗi frame
+        bits_per_frame = self.W * rate * self.T_slot / self.fps
+        mad = self.slot_mad[min(slot_idx, len(self.slot_mad) - 1)]
+
+        if mad < 0.01 or bits_per_frame <= 0:
+            return 32  # Fallback
+
+        # Giải: bits = MAD × (X1/Qstep + X2/Qstep²)
+        # Đặt u = 1/Qstep → MAD·X2·u² + MAD·X1·u - bits = 0
+        a = mad * self.X2
+        b = mad * self.X1
+        c = -bits_per_frame
+
+        discriminant = b ** 2 - 4 * a * c
+        if discriminant < 0:
+            return 32
+
+        u = (-b + np.sqrt(discriminant)) / (2 * a)
+        if u <= 0:
+            return 32
+
+        Qstep = 1.0 / u
+        QP = int(round(6 * np.log2(max(Qstep, 1.0)) + 4))
+        return int(np.clip(QP, 10, 51))
 
     def get_segment_frames(self, start_frame, num_frames):
         with open(self.yuv_path, 'rb') as f:
@@ -107,7 +164,7 @@ class VideoEncoder:
         os.makedirs(output_dir, exist_ok=True)
         total_size = 0
         for i, r in enumerate(rates):
-            qp = self.rate_to_qp(r)
+            qp = self.rate_to_qp(r, slot_idx=i)
             output_path = os.path.join(output_dir, f"slot_{i+1:03d}.264")
             frames_data = self.get_segment_frames(i * 10, 10)
             self.encode_gop(frames_data, output_path, qp)
@@ -301,13 +358,8 @@ def compute_circle_rates(q_A, q_B, w_BS):
 # ==============================================================================
 
 def plot_all_trajectories(all_results):
-    """Vẽ quỹ đạo tối ưu cho tất cả các cấu hình PU/BS."""
-    n_cases = len(all_results)
-    cols = min(3, n_cases)
-    rows = (n_cases + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 5*rows))
-    if n_cases == 1:
-        axes = np.array([axes])
+    """Vẽ quỹ đạo tối ưu cho tất cả các cấu hình PU/BS (2×2 grid)."""
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     axes = axes.flatten()
 
     for idx, (case_name, data) in enumerate(all_results.items()):
@@ -342,10 +394,6 @@ def plot_all_trajectories(all_results):
         ax.legend(fontsize=6, loc='best')
         ax.grid(True, alpha=0.3)
         ax.set_aspect('equal')
-
-    # Ẩn subplot thừa
-    for i in range(n_cases, len(axes)):
-        axes[i].set_visible(False)
 
     fig.suptitle("UAV Trajectory Optimization — Different PU/BS Configurations",
                  fontsize=14, fontweight='bold')
@@ -398,16 +446,11 @@ if __name__ == "__main__":
 
         print(f"    Avg Rate: Sigmoid={avg_opt:.2f}, Log={avg_log:.2f}, Straight={avg_straight:.2f}, Circle={avg_circle:.2f}")
 
-        # 5. Encode
-        print("    Encoding Optimized (Sigmoid QoE + Adaptive QP)...")
-        sz_opt = encoder.encode_scenario(
-            opt_rates, str(BITSTREAM_DIR / case_name / "Optimized"))
-        print(f"      Size: {sz_opt:.1f} KB")
-
-        print("    Encoding Opt_LogQoE (Log QoE + Adaptive QP)...")
-        sz_log = encoder.encode_scenario(
-            log_rates, str(BITSTREAM_DIR / case_name / "Opt_LogQoE"))
-        print(f"      Size: {sz_log:.1f} KB")
+        # 5. Encode Adaptive QP (dùng Log QoE rates — PSNR tốt hơn)
+        print("    Encoding Adaptive_QP...")
+        sz_aqp = encoder.encode_scenario(
+            log_rates, str(BITSTREAM_DIR / case_name / "Adaptive_QP"))
+        print(f"      Size: {sz_aqp:.1f} KB")
 
         print("    Encoding Straight...")
         sz_straight = encoder.encode_scenario(
@@ -419,16 +462,16 @@ if __name__ == "__main__":
             circle_rates, str(BITSTREAM_DIR / case_name / "Circle"))
         print(f"      Size: {sz_circle:.1f} KB")
 
-        # 6. SVC 2-Layer (dùng quỹ đạo sigmoid)
+        # 6. SVC 2-Layer (dùng cùng rates)
         print("    Encoding SVC (BL+EL)...")
         encoder.encode_svc(
-            opt_rates, str(BITSTREAM_DIR / case_name / "SVC"))
+            log_rates, str(BITSTREAM_DIR / case_name / "SVC"))
 
         # Lưu rates để evaluator biết chọn lớp nào
         import json
         rates_path = str(BITSTREAM_DIR / case_name / "opt_rates.json")
         with open(rates_path, 'w') as f:
-            json.dump(opt_rates, f)
+            json.dump(log_rates, f)
 
         all_results[case_name] = {
             "config": cfg,
@@ -440,6 +483,8 @@ if __name__ == "__main__":
             "traj_log": traj_log,
             "traj_straight": traj_s,
             "traj_circle": traj_c,
+            "power": power,
+            "power_log": power_log,
             "qoe_hist_sig": qoe_hist_sig,
             "qoe_hist_log": qoe_hist_log,
         }
@@ -451,9 +496,8 @@ if __name__ == "__main__":
     # 8. Vẽ BCD Convergence Curve
     print("[Plotting BCD convergence...]")
     n_cases = len(all_results)
-    fig, axes = plt.subplots(1, n_cases, figsize=(4 * n_cases, 4))
-    if n_cases == 1:
-        axes = [axes]
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    axes = axes.flatten()
     for idx, (case_name, data) in enumerate(all_results.items()):
         ax = axes[idx]
         iters = range(1, 9)
@@ -474,7 +518,46 @@ if __name__ == "__main__":
     fig.savefig(conv_path, dpi=150)
     print(f"  Saved: {conv_path}")
 
-    # 9. Bảng tổng kết
+    # 9. Vẽ Power & Rate (2×2)
+    print("[Plotting power & rate...]")
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
+    axes = axes.flatten()
+    t_slots = np.arange(1, N + 1)
+    for idx, (case_name, data) in enumerate(all_results.items()):
+        ax = axes[idx]
+        ax2 = ax.twinx()
+
+        # Power bars (Sigmoid)
+        ax.bar(t_slots - 0.15, data["power"], 0.3, color='#2196F3',
+               alpha=0.6, label='P(t) Sigmoid')
+        ax.bar(t_slots + 0.15, data["power_log"], 0.3, color='#FF5722',
+               alpha=0.6, label='P(t) Log')
+
+        # Rate lines
+        ax2.plot(t_slots, data["opt_rates"], '-o', color='#1565C0',
+                 ms=3, lw=1.5, label='Rate (Sigmoid)')
+        ax2.plot(t_slots, data["log_rates"], '-s', color='#BF360C',
+                 ms=3, lw=1.5, label='Rate (Log)')
+        ax2.axhline(y=3.0, color='#9C27B0', ls='--', lw=1, alpha=0.5)
+        ax2.text(N + 0.5, 3.0, 'R_BL+R_EL', fontsize=7,
+                 color='#9C27B0', va='center')
+
+        ax.set_xlabel('Time Slot', fontsize=9)
+        ax.set_ylabel('Power P(t) [W]', fontsize=9, color='#2196F3')
+        ax2.set_ylabel('Rate R(t) [bps/Hz]', fontsize=9, color='#BF360C')
+        ax.set_title(case_name, fontsize=10, fontweight='bold')
+        ax.legend(fontsize=7, loc='upper left')
+        ax2.legend(fontsize=7, loc='upper right')
+        ax.grid(True, alpha=0.3)
+
+    fig.suptitle('Power Allocation & Achievable Rate — 4 Configurations',
+                 fontsize=13, fontweight='bold')
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    pr_path = str(RESULTS_DIR / "power_rate_all_cases.png")
+    fig.savefig(pr_path, dpi=150)
+    print(f"  Saved: {pr_path}")
+
+    # 10. Bảng tổng kết
     print("\n" + "=" * 85)
     print(f" {'Case':<22} {'Sigmoid':>10} {'LogQoE':>10} {'Straight':>10} {'Circle':>10}")
     print("-" * 85)

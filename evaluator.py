@@ -142,10 +142,9 @@ if __name__ == "__main__":
         print("[ERROR] No encoded cases found. Run encoder.py first.")
         exit(1)
 
-    METHODS = ["Optimized", "Opt_LogQoE", "Straight", "Circle", "SVC"]
+    METHODS = ["Adaptive_QP", "Straight", "Circle", "SVC"]
     METHOD_COLORS = {
-        "Optimized": "#2196F3",     # Xanh dương — Sigmoid QoE + Adaptive QP
-        "Opt_LogQoE": "#FF5722",    # Cam đậm — Log QoE + Adaptive QP
+        "Adaptive_QP": "#2196F3",   # Xanh dương — BCD+SCA + Adaptive QP
         "Straight": "#FF9800",
         "Circle": "#4CAF50", "SVC": "#9C27B0"
     }
@@ -192,9 +191,9 @@ if __name__ == "__main__":
                 case_data[method] = {"psnrs": psnrs, "avg": avg}
                 print(f"    {method:<12}: Avg PSNR = {avg:.2f} dB")
 
-        if "Optimized" in case_data:
-            gain_s = case_data["Optimized"]["avg"] - case_data.get("Straight", {"avg": 0})["avg"]
-            gain_c = case_data["Optimized"]["avg"] - case_data.get("Circle", {"avg": 0})["avg"]
+        if "Adaptive_QP" in case_data:
+            gain_s = case_data["Adaptive_QP"]["avg"] - case_data.get("Straight", {"avg": 0})["avg"]
+            gain_c = case_data["Adaptive_QP"]["avg"] - case_data.get("Circle", {"avg": 0})["avg"]
             print(f"    Gain vs Straight: {gain_s:+.2f} dB")
             print(f"    Gain vs Circle:   {gain_c:+.2f} dB")
 
@@ -202,14 +201,9 @@ if __name__ == "__main__":
         summary.append(case_name)
 
     # ==================================================================
-    # Biểu đồ 1: PSNR theo frame cho từng case
+    # Biểu đồ 1: PSNR theo frame cho từng case (2×2)
     # ==================================================================
-    n_cases = len(all_psnr)
-    cols = min(3, n_cases)
-    rows = (n_cases + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 4*rows))
-    if n_cases == 1:
-        axes = np.array([axes])
+    fig, axes = plt.subplots(2, 2, figsize=(12, 9))
     axes = axes.flatten()
 
     for idx, case_name in enumerate(summary):
@@ -220,14 +214,11 @@ if __name__ == "__main__":
                 ax.plot(data[method]["psnrs"],
                         color=METHOD_COLORS[method], lw=1.2,
                         label=f'{method} ({data[method]["avg"]:.1f} dB)')
-        ax.set_title(f'{case_name}', fontsize=10)
+        ax.set_title(f'{case_name}', fontsize=10, fontweight='bold')
         ax.set_xlabel("Frame"); ax.set_ylabel("PSNR (dB)")
         ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
 
-    for i in range(n_cases, len(axes)):
-        axes[i].set_visible(False)
-
-    fig.suptitle("PSNR Comparison — Optimized vs Straight vs Circle",
+    fig.suptitle("PSNR Comparison — Adaptive QP vs Straight vs Circle vs SVC",
                  fontsize=13, fontweight='bold')
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     path1 = str(RESULTS_DIR / "psnr_all_cases.png")
@@ -238,26 +229,26 @@ if __name__ == "__main__":
     # Biểu đồ 2: Bar chart tổng hợp
     # ==================================================================
     fig2, ax2 = plt.subplots(figsize=(12, 5))
-    x = np.arange(len(summary))
-    width = 0.25
+    x = np.arange(len(summary)) * 2.0  # Khoảng cách lớn giữa các case
+    width = 0.35
 
     for i, method in enumerate(METHODS):
         vals = [all_psnr[c].get(method, {"avg": 0})["avg"] for c in summary]
-        offset = (i - 1) * width
+        offset = (i - 1.5) * width
         bars = ax2.bar(x + offset, vals, width, label=method,
                        color=METHOD_COLORS[method], edgecolor='white')
 
-    # Ghi gain lên bar Optimized
+    # Ghi gain lên bar Adaptive_QP
     for i, case_name in enumerate(summary):
-        opt_val = all_psnr[case_name].get("Optimized", {"avg": 0})["avg"]
+        opt_val = all_psnr[case_name].get("Adaptive_QP", {"avg": 0})["avg"]
         str_val = all_psnr[case_name].get("Straight", {"avg": 0})["avg"]
         gain = opt_val - str_val
-        ax2.annotate(f'+{gain:.1f}', xy=(x[i] - width, opt_val),
+        ax2.annotate(f'+{gain:.1f}', xy=(x[i] - 1.5 * width, opt_val),
                      ha='center', va='bottom', fontsize=8, fontweight='bold',
                      color='#1565C0')
 
     ax2.set_ylabel('Avg PSNR (dB)', fontsize=11)
-    ax2.set_title('PSNR Summary — Optimized vs Straight vs Circle\n'
+    ax2.set_title('PSNR Summary — Adaptive QP vs Baselines\n'
                   'across different PU/BS configurations',
                   fontsize=12, fontweight='bold')
     ax2.set_xticks(x)
@@ -274,11 +265,11 @@ if __name__ == "__main__":
     # Bảng tổng kết
     # ==================================================================
     print("\n" + "=" * 75)
-    print(f" {'Case':<22} {'Optimized':>10} {'Straight':>10} {'Circle':>10} {'Gain(S)':>10}")
+    print(f" {'Case':<22} {'Adaptive_QP':>12} {'Straight':>10} {'Circle':>10} {'Gain(S)':>10}")
     print("-" * 75)
     for case_name in summary:
         d = all_psnr[case_name]
-        o = d.get("Optimized", {"avg": 0})["avg"]
+        o = d.get("Adaptive_QP", {"avg": 0})["avg"]
         s = d.get("Straight", {"avg": 0})["avg"]
         c = d.get("Circle", {"avg": 0})["avg"]
         print(f" {case_name:<22} {o:>8.2f}dB {s:>8.2f}dB {c:>8.2f}dB {o-s:>+8.2f}dB")
@@ -293,7 +284,7 @@ if __name__ == "__main__":
     x = np.arange(len(summary))
     width = 0.25
 
-    opt_vals = [all_psnr[c].get("Optimized", {"avg": 0})["avg"] for c in summary]
+    opt_vals = [all_psnr[c].get("Adaptive_QP", {"avg": 0})["avg"] for c in summary]
     svc_vals = [all_psnr[c].get("SVC", {"avg": 0})["avg"] for c in summary]
     
     ax3a.bar(x - width/2, opt_vals, width, label='Adaptive QP', color='#2196F3', edgecolor='white')
@@ -333,9 +324,9 @@ if __name__ == "__main__":
         fig4, ax4 = plt.subplots(figsize=(12, 5))
         d = all_psnr[ref_case]
 
-        if "Optimized" in d:
-            ax4.plot(d["Optimized"]["psnrs"], color='#2196F3', lw=1.8,
-                     label=f'Adaptive QP ({d["Optimized"]["avg"]:.1f} dB)')
+        if "Adaptive_QP" in d:
+            ax4.plot(d["Adaptive_QP"]["psnrs"], color='#2196F3', lw=1.8,
+                     label=f'Adaptive QP ({d["Adaptive_QP"]["avg"]:.1f} dB)')
         if "SVC" in d:
             ax4.plot(d["SVC"]["psnrs"], color='#9C27B0', lw=1.5,
                      label=f'SVC R_EL=1.0 ({d["SVC"]["avg"]:.1f} dB)')
@@ -385,7 +376,7 @@ if __name__ == "__main__":
         for method in METHODS:
             if method in d:
                 ax.plot(d[method]["psnrs"], color=METHOD_COLORS[method],
-                        lw=1.2 if method not in ["Optimized", "Opt_LogQoE"] else 1.8,
+                        lw=1.8 if method == "Adaptive_QP" else 1.2,
                         alpha=0.6 if method in ["Straight", "Circle"] else 1.0,
                         label=f'{method} ({d[method]["avg"]:.1f}dB)')
         ax.set_ylabel("PSNR (dB)", fontsize=9)
