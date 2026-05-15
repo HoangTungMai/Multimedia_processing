@@ -37,17 +37,17 @@ CONFIGS = {
         "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
         "w_BS": [200.0, 0.0], "w_PU": [100.0, 100.0],
     },
-    "Case3_BS_Far": {
+    "Case2_BS_Far": {
         "desc": "BS o xa, PU gan BS",
         "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
         "w_BS": [300.0, 50.0], "w_PU": [250.0, 80.0],
     },
-    "Case4_Opposite": {
+    "Case3_Opposite": {
         "desc": "PU va BS doi dien nhau",
         "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
         "w_BS": [50.0, 200.0], "w_PU": [200.0, 50.0],
     },
-    "Case5_PU_Near_Start": {
+    "Case4_PU_Near_Start": {
         "desc": "PU gan diem xuat phat A",
         "q_A": [0.0, 0.0], "q_B": [200.0, 200.0],
         "w_BS": [200.0, 0.0], "w_PU": [30.0, 30.0],

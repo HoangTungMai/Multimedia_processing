@@ -262,18 +262,51 @@ if __name__ == "__main__":
     print(f"  Saved: {path2}")
 
     # ==================================================================
-    # Bảng tổng kết
+    # Bảng tổng kết & Lưu file markdown
     # ==================================================================
-    print("\n" + "=" * 75)
-    print(f" {'Case':<22} {'Adaptive_QP':>12} {'Straight':>10} {'Circle':>10} {'Gain(S)':>10}")
-    print("-" * 75)
+    md_content = "# Thống kê PSNR trung bình các phương pháp\n\n"
+    md_content += "| Kịch bản (Case) | Quỹ đạo Tối ưu (Adaptive QP) | Quỹ đạo Thẳng (Straight) | Quỹ đạo Tròn (Circle) | SVC | Mức tăng so với SVC |\n"
+    md_content += "| :--- | :---: | :---: | :---: | :---: | :---: |\n"
+
+    print("\n" + "=" * 85)
+    print(f" {'Case':<22} {'Adaptive_QP':>12} {'Straight':>10} {'Circle':>10} {'SVC':>10} {'Gain(SVC)':>12}")
+    print("-" * 85)
     for case_name in summary:
         d = all_psnr[case_name]
         o = d.get("Adaptive_QP", {"avg": 0})["avg"]
         s = d.get("Straight", {"avg": 0})["avg"]
         c = d.get("Circle", {"avg": 0})["avg"]
-        print(f" {case_name:<22} {o:>8.2f}dB {s:>8.2f}dB {c:>8.2f}dB {o-s:>+8.2f}dB")
-    print("=" * 75)
+        svc = d.get("SVC", {"avg": 0})["avg"]
+        print(f" {case_name:<22} {o:>8.2f}dB {s:>8.2f}dB {c:>8.2f}dB {svc:>8.2f}dB {o-svc:>+10.2f}dB")
+        md_content += f"| **{case_name}** | **{o:.2f} dB** | {s:.2f} dB | {c:.2f} dB | {svc:.2f} dB | **{o-svc:+.2f} dB** |\n"
+    print("=" * 85)
+
+    # === Bảng chi tiết PSNR từng Time Slot ===
+    md_content += "\n## Chi tiết PSNR từng Time Slot (Frame)\n"
+    for case_name in summary:
+        d = all_psnr[case_name]
+        md_content += f"\n### {case_name}\n"
+        md_content += "| Slot/Frame | Adaptive QP | Straight | Circle | SVC |\n"
+        md_content += "| :---: | :---: | :---: | :---: | :---: |\n"
+        
+        o_psnrs = d.get("Adaptive_QP", {}).get("psnrs", [])
+        s_psnrs = d.get("Straight", {}).get("psnrs", [])
+        c_psnrs = d.get("Circle", {}).get("psnrs", [])
+        svc_psnrs = d.get("SVC", {}).get("psnrs", [])
+        
+        num_frames = max(len(o_psnrs), len(s_psnrs), len(c_psnrs), len(svc_psnrs))
+        if num_frames == 0: continue
+        for i in range(num_frames):
+            o_val = f"{o_psnrs[i]:.2f}" if i < len(o_psnrs) else "-"
+            s_val = f"{s_psnrs[i]:.2f}" if i < len(s_psnrs) else "-"
+            c_val = f"{c_psnrs[i]:.2f}" if i < len(c_psnrs) else "-"
+            svc_val = f"{svc_psnrs[i]:.2f}" if i < len(svc_psnrs) else "-"
+            md_content += f"| {i+1} | {o_val} | {s_val} | {c_val} | {svc_val} |\n"
+
+    md_path = str(RESULTS_DIR / "psnr_summary.md")
+    with open(md_path, 'w', encoding='utf-8') as f:
+        f.write(md_content)
+    print(f"  Saved: {md_path}")
 
     # ==================================================================
     # Biểu đồ 3: Phân tích SVC (Optimal Threshold)
